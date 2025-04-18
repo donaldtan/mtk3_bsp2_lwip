@@ -59,6 +59,11 @@ EXPORT ER knl_start_device( void )
 
 #if DEVCNF_USE_HAL_ADC
 	err = dev_init_hal_adc( 0, &g_adc0_ctrl, &g_adc0_cfg, &g_adc0_channel_cfg);
+	if(err < E_OK) return err;
+#endif
+
+#if DEVCNF_USE_HAL_NET
+	err = dev_init_hal_net( 0 );
 #endif
 
 	return err;

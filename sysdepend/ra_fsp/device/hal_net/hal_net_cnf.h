@@ -19,10 +19,13 @@
 #ifndef	_DEV_HAL_NET_CNF_H_
 #define	_DEV_HAL_NET_CNF_H_
 
-#define DEVNAME_HAL_NET		"neta"
-#define DEV_HAL_NET_TMOUT	(500)
+#define DEVNAME_HAL_NET		"net"
+#define DEV_HAL_NET_TMOUT	(2000)
+#define DEV_HAL_RBUF_NUM	8
+
+#define ETH_MAX_FRAME_LENGTH	(1514)
 
 
-#define DEV_HAL_NET_UNITNM	(1)	// Number of A/DC units (max 26)
+#define DEV_HAL_NET_UNITNM	(1)	// Number of Net units
 
-#endif	/* _DEV_HAL_ADC_CNF_H_ */
+#endif	/* _DEV_HAL_NET_CNF_H_ */

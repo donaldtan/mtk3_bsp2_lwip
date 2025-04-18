@@ -150,4 +150,6 @@ typedef struct {
 
 IMPORT ER dev_init_hal_net( UW unit );
 
+IMPORT ER hal_net_get_link_status( UW unit );
+
 #endif /* _DEV_HAL_NET_H_ */

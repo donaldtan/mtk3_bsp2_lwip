@@ -20,11 +20,20 @@
 
 #include <tk/tkernel.h>
 #include <tk/device.h>
+#include <sys/queue.h>
 
 #include <sysdepend/ra_fsp/cpu_status.h>
 #include <mtkernel/kernel/knlinc/tstdlib.h>
 #include <mtkernel/device/common/drvif/msdrvif.h>
+#include <hal_data.h>
 #include "hal_net_cnf.h"
+
+LOCAL __attribute__((__aligned__(32)))uint8_t ether_rx_buffers[DEV_HAL_RBUF_NUM][1536]ETHER_BUFFER_PLACE_IN_SECTION;
+
+#define UNUSED(x)		((void *) (x)) 
+
+#define ETHER_FLGPTN_TX_COMPLETE	(1U << 0)
+#define ETHER_FLGPTN_TX_ABORTED		(1U << 1)
 
 /*
  *	hal_net.c
@@ -35,41 +44,104 @@
 /*Net Device driver Control block
  */
 typedef struct {
-	adc_ctrl_t		*hadc;		// ADC handle
-	const adc_cfg_t		*cadc;		// ADC config
-	const adc_channel_cfg_t	*cfadc;		// ADC channel config
 	ID			devid;		// Device ID
-	UW			unit;		// Unit no
 	UINT			omode;		// Open mode
-	ER			err;		// Error code that occurred during interrupt processing
+	UW			unit;		// Unit no
+	BOOL			initialized;	// Is device initialized.
 	ID			evtmbfid;	// MBF ID for event notification
+	ID			rxmbfid;	// MBF ID for RX event notification
+	QUEUE 			freerxbufq;	// Free RX buffer Queue
+	ID			flgid;		// Event flag ID
+	BOOL			linkstatus;	// Link status	
 } T_HAL_NET_DCB;
 
 /* Interrupt detection flag */
-LOCAL ID	id_flgid;
-LOCAL T_CFLG	id_flg	= {
+LOCAL const T_CFLG	id_flg	= {
 			.flgatr		= TA_TFIFO | TA_WMUL,
 			.iflgptn	= 0,
 };
 
 #if TK_SUPPORT_MEMLIB
-LOCAL T_HAL_ADC_DCB	*dev_adc_cb[DEV_HAL_ADC_UNITNM];
-#define		get_dcb_ptr(unit)	(dev_adc_cb[unit])
+LOCAL T_HAL_NET_DCB	*dev_net_cb[DEV_HAL_NET_UNITNM] = {0};
+#define		get_dcb_ptr(unit)	(dev_net_cb[unit])
 #else
-LOCAL T_HAL_ADC_DCB	dev_adc_cb[DEV_HAL_ADC_UNITNM];
-#define		get_dcb_ptr(unit)	(&dev_ADC_cb[unit])
+LOCAL T_HAL_NET_DCB	dev_net_cb[DEV_HAL_NET_UNITNM] = {0};
+#define		get_dcb_ptr(unit)	(&dev_net_cb[unit])
 #endif
+
+#define netdrv_check_param(req, type)	(((req)->size < (W) sizeof(type)) ? E_PAR : E_OK)
 
 /*---------------------------------------------------------------------*/
 /* Attribute data control
  */
-LOCAL ER read_atr(T_HAL_ADC_DCB *p_dcb, T_DEVREQ *req)
+LOCAL ER read_atr(T_HAL_NET_DCB *p_dcb, T_DEVREQ *req)
 {
-	return E_PAR;
+	ER ercd;
+	
+	switch(req->start) {
+	case DN_NETEVENT:
+		ercd = netdrv_check_param( req, ID );
+		if( ercd == E_OK ) {
+			*((ID *)req->buf) = p_dcb->rxmbfid;
+		}
+		break;
+	case DN_NETADDR:
+		ercd = netdrv_check_param( req, NetAddr );
+		if( ercd == E_OK ) {
+			memcpy(req->buf, g_ether0.p_cfg->p_mac_address, sizeof(NetAddr));
+		}
+		break;
+	case DN_NETRXBUFSZ:
+	case DN_NETDEVINFO:
+	case DN_NETRESET:
+	case DN_NETSTINFO:
+	case DN_NETCSTINFO:
+	case DN_NETWLANCONFIG:
+	case DN_NETWLANSTINFO:
+	case DN_NETWLANCSTINFO:
+		return E_NOSPT;
+	default:
+		return E_PAR;
+	}
+	return E_OK;
 }
 
-LOCAL ER write_atr(T_HAL_ADC_DCB *p_dcb, T_DEVREQ *req)
+LOCAL ER write_atr(T_HAL_NET_DCB *p_dcb, T_DEVREQ *req)
 {
+	ER ercd;
+	
+	switch( req->start ) {
+	case DN_NETEVENT:
+		ercd = netdrv_check_param( req, ID );
+		if( ercd == E_OK ) {
+			p_dcb->rxmbfid = *((ID *)req->buf);
+		}
+		break;
+
+	case DN_NETRXBUF:
+		ercd = netdrv_check_param( req, void* );
+		if( ercd == E_OK ) {
+			/* Disable the ether interrupt to achieve synchronization. */
+			DisableInt((UINT) g_ether0.p_cfg->irq);
+			QueInsert(*((QUEUE**)req->buf), &p_dcb->freerxbufq);
+			EnableInt((UINT) g_ether0.p_cfg->irq, (INT) g_ether0.p_cfg->interrupt_priority);
+		}
+		break;
+	case DN_NETRXBUFSZ:
+		ercd = netdrv_check_param( req, NetRxBufSz );
+		/* Can't set RX buffer size to r_ether module. Always return E_OK. */
+		return E_OK;
+	case DN_NETRESET:
+	case DN_SET_MCAST_LIST:
+	case DN_SET_ALL_MCAST:
+	case DN_NETWLANCONFIG:
+		/* NOT SUPPORTED */
+		return E_NOSPT;
+	default:
+		
+		return E_PAR;
+	}
+	
 	return E_PAR;
 }
 
@@ -78,58 +150,105 @@ LOCAL ER write_atr(T_HAL_ADC_DCB *p_dcb, T_DEVREQ *req)
  */
 
 /* HAL Callback functions */
-LOCAL void HAL_ADC_Callback(adc_callback_args_t *p_args)
+LOCAL void HAL_Net_Callback(ether_callback_args_t * p_args)
 {
-	T_HAL_ADC_DCB	*p_dcb;
+	T_HAL_NET_DCB	*p_dcb;
+	fsp_err_t	err;
+	NetEvent	event;
+	uint32_t 	length;
+	void 		*pbuf;
+	ER		ercd;
 
 	ENTER_TASK_INDEPENDENT
 
-	p_dcb = (T_HAL_ADC_DCB*)p_args->p_context;
-	tk_set_flg(id_flgid, 1<< p_dcb->unit);
+	p_dcb = (T_HAL_NET_DCB*)p_args->p_context;
 
 	switch(p_args->event) {
-		case ADC_EVENT_SCAN_COMPLETE:
-			p_dcb->err = E_OK;
+		case ETHER_EVENT_TX_COMPLETE:
+			tk_set_flg(p_dcb->flgid, ETHER_FLGPTN_TX_COMPLETE);
 			break;
+		case ETHER_EVENT_TX_ABORTED:
+			tk_set_flg(p_dcb->flgid, ETHER_FLGPTN_TX_ABORTED);
+			break;
+		case ETHER_EVENT_RX_COMPLETE:
+			do {
+				err = g_ether0.p_api->read(g_ether0.p_ctrl, &event.buf, &length);
+				if( err == FSP_SUCCESS ) {
+					pbuf = (void *) QueRemoveNext( &p_dcb->freerxbufq );
+					if( pbuf != NULL ) {
+						event.len = (UH) length;
+						ercd = tk_snd_mbf( p_dcb->rxmbfid, &event, sizeof( NetEvent ), TMO_POL );
+						
+						if(ercd >= E_OK) {
+							g_ether0.p_api->rxBufferUpdate(g_ether0.p_ctrl, pbuf);
+							continue;
+						}
+						else {
+							QueInsert((QUEUE*)pbuf, &p_dcb->freerxbufq);
+						}
+					}
+				}
+				
+				if( err != FSP_ERR_ETHER_ERROR_NO_DATA ) {
+					/* Release current buffer that set to the descriptor. */
+					g_ether0.p_api->bufferRelease(g_ether0.p_ctrl);
+				}
+			} while(FSP_ERR_ETHER_ERROR_NO_DATA != err);
+			break;
+		case ETHER_EVENT_LINK_ON:
+			p_dcb->linkstatus = TRUE;
+			break;
+		case ETHER_EVENT_LINK_OFF:
+			p_dcb->linkstatus = FALSE;
+			break;
+		case ETHER_EVENT_ERR_GLOBAL:
+			break;
+		case ETHER_EVENT_RX_MESSAGE_LOST:
 		default:
-			p_dcb->err = E_IO;
 			break;
 	}
 
 	LEAVE_TASK_INDEPENDENT
 }
 
-LOCAL ER read_data(T_HAL_ADC_DCB *p_dcb, T_DEVREQ *req)
+LOCAL ER read_data(T_HAL_NET_DCB *p_dcb, T_DEVREQ *req)
 {
-	uint16_t	val;
-	UINT		wflgptn, rflgptn;
-	ER		err;
-
-	if(req->size == 0) {
-		req->asize = 1;
-		return E_OK;
-	}
-
-	wflgptn = 1 << p_dcb->unit;
-	tk_clr_flg(id_flgid, ~wflgptn);
-	R_ADC_ScanStart(p_dcb->hadc);
-
-	err = tk_wai_flg(id_flgid, wflgptn, TWF_ANDW | TWF_BITCLR, &rflgptn, DEV_HAL_ADC_TMOUT);
-	if(err >= E_OK) {
-		err = p_dcb->err;
-		if(err >= E_OK) {
-			R_ADC_Read(p_dcb->hadc, req->start, &val);
-			*(UW*)(req->buf) = val;
-			req->asize= 1;
-		}
-	}
-
-	return err;
+	UNUSED(p_dcb);
+	UNUSED(req);
+	return E_NOSPT;
 }
 
-LOCAL ER write_data(T_HAL_ADC_DCB *p_dcb, T_DEVREQ *req)
+LOCAL ER write_data(T_HAL_NET_DCB *p_dcb, T_DEVREQ *req)
 {
-	return E_RONLY;
+	fsp_err_t	fsp_err;
+	UINT		flgptn;
+	ER		er;
+	
+	if( req->size < 0 ) {
+		return E_PAR;
+	}
+	if( req->size == 0 ) {
+		return ((g_ether0.p_cfg->ether_buffer_size > ETH_MAX_FRAME_LENGTH) ? ETH_MAX_FRAME_LENGTH : (ER) g_ether0.p_cfg->ether_buffer_size);
+	}
+	else {
+		fsp_err = g_ether0.p_api->write(g_ether0.p_ctrl, req->buf, (uint32_t) req->size);
+		if( fsp_err != FSP_SUCCESS ) {
+			return E_IO;
+		}
+		
+		er = tk_wai_flg(p_dcb->flgid, 
+				ETHER_FLGPTN_TX_COMPLETE | ETHER_FLGPTN_TX_ABORTED, 
+				TWF_ORW | TWF_BITCLR, 
+				&flgptn, 
+				DEV_HAL_NET_TMOUT);
+		if( er < E_OK ) {
+			return er;
+		}
+		else if( (flgptn & ETHER_FLGPTN_TX_ABORTED) != 0 ) {
+			return E_IO;
+		}
+		return E_OK;
+	}
 }
 
 /*----------------------------------------------------------------------
@@ -138,40 +257,36 @@ LOCAL ER write_data(T_HAL_ADC_DCB *p_dcb, T_DEVREQ *req)
 /*
  * Open device
  */
-LOCAL ER dev_adc_openfn( ID devid, UINT omode, T_MSDI *p_msdi)
+LOCAL ER dev_net_openfn( ID devid, UINT omode, T_MSDI *p_msdi)
 {
-	T_HAL_ADC_DCB	*p_dcb;
-
-	p_dcb = (T_HAL_ADC_DCB*)(p_msdi->dmsdi.exinf);
-	if(p_dcb->hadc == NULL) return E_IO;
-
-	p_dcb->omode = omode;
-
-	R_ADC_Open(p_dcb->hadc, p_dcb->cadc);
-	R_ADC_ScanCfg(p_dcb->hadc, p_dcb->cfadc);
-	R_ADC_CallbackSet(p_dcb->hadc, HAL_ADC_Callback, p_dcb, NULL);
-
+	UNUSED(devid);
+	UNUSED(omode);
+	UNUSED(p_msdi);
+	/* Do Nothing. */
 	return E_OK;
 }
 
 /*
  * Close Device
  */
-LOCAL ER dev_adc_closefn( ID devid, UINT option, T_MSDI *p_msdi)
+LOCAL ER dev_net_closefn( ID devid, UINT option, T_MSDI *p_msdi)
 {
+	UNUSED(devid);
+	UNUSED(option);
+	UNUSED(p_msdi);
+	/* Do Nothing. */
 	return E_OK;
 }
 
 /*
  * Read Device
  */
-LOCAL ER dev_adc_readfn( T_DEVREQ *req, T_MSDI *p_msdi)
+LOCAL ER dev_net_readfn( T_DEVREQ *req, T_MSDI *p_msdi)
 {
-	T_HAL_ADC_DCB	*p_dcb;
+	T_HAL_NET_DCB	*p_dcb;
 	ER		err;
 
-	p_dcb = (T_HAL_ADC_DCB*)(p_msdi->dmsdi.exinf);
-	if(p_dcb->hadc == NULL) return E_IO;
+	p_dcb = (T_HAL_NET_DCB*)(p_msdi->dmsdi.exinf);
 
 	if(req->start >= 0) {
 		err = read_data( p_dcb, req);	// Device specific data
@@ -184,56 +299,59 @@ LOCAL ER dev_adc_readfn( T_DEVREQ *req, T_MSDI *p_msdi)
 /*
  * Write Device
  */
-LOCAL ER dev_adc_writefn( T_DEVREQ *req, T_MSDI *p_msdi)
+LOCAL ER dev_net_writefn( T_DEVREQ *req, T_MSDI *p_msdi)
 {
-	T_HAL_ADC_DCB	*p_dcb;
-	ER		rtn;
+	T_HAL_NET_DCB	*p_dcb;
+	ER		err;
 
-	p_dcb = (T_HAL_ADC_DCB*)(p_msdi->dmsdi.exinf);
-	if(p_dcb->hadc == NULL) return E_IO;
+	p_dcb = (T_HAL_NET_DCB*)(p_msdi->dmsdi.exinf);
 
 	if(req->start >= 0) {
-		rtn = write_data( p_dcb, req);	// Device specific data
+		err = write_data( p_dcb, req);	// Device specific data
 	} else {
-		rtn = write_atr( p_dcb, req);	// Device attribute data
+		err = write_atr( p_dcb, req);	// Device attribute data
 	}
-	return rtn;
+	return err;
 }
 
 /*
  * Event Device
  */
-LOCAL ER dev_adc_eventfn( INT evttyp, void *evtinf, T_MSDI *p_msdi)
+LOCAL ER dev_net_eventfn( INT evttyp, void *evtinf, T_MSDI *p_msdi)
 {
+	UNUSED(evttyp);
+	UNUSED(evtinf);
+	UNUSED(p_msdi);
+	/* Do Nothing. */
 	return E_NOSPT;
 }
 
 /*----------------------------------------------------------------------
  * Device driver initialization and registration
  */
-EXPORT ER dev_init_hal_adc( UW unit, adc_ctrl_t *hadc,
-				const adc_cfg_t *cadc, const adc_channel_cfg_t *cfadc)
+EXPORT ER dev_init_hal_net( UW unit )
 {
-	T_HAL_ADC_DCB	*p_dcb;
+	T_HAL_NET_DCB	*p_dcb;
 	T_IDEV		idev;
 	T_MSDI		*p_msdi;
 	T_DMSDI		dmsdi;
 	ER		err;
 	INT		i;
+	fsp_err_t 	fsp_err;
 
-	if( unit >= DEV_HAL_ADC_UNITNM) return E_PAR;
+	if( unit >= DEV_HAL_NET_UNITNM) return E_PAR;
 
 #if TK_SUPPORT_MEMLIB
-	p_dcb = (T_HAL_ADC_DCB*)Kmalloc(sizeof(T_HAL_ADC_DCB));
+	p_dcb = (T_HAL_NET_DCB*)Kmalloc(sizeof(T_HAL_NET_DCB));
 	if( p_dcb == NULL) return E_NOMEM;
-	dev_adc_cb[unit]	= p_dcb;
+	dev_net_cb[unit]	= p_dcb;
 #else
-	p_dcb = &dev_adc_cb[unit];
+	p_dcb = &dev_net_cb[unit];
 #endif
 
-	id_flgid = tk_cre_flg(&id_flg);
-	if(id_flgid <= E_OK) {
-		err = (ER)id_flgid;
+	p_dcb->flgid = tk_cre_flg(&id_flg);
+	if(p_dcb->flgid <= E_OK) {
+		err = (ER)p_dcb->flgid;
 		goto err_1;
 	}
 
@@ -243,28 +361,44 @@ EXPORT ER dev_init_hal_adc( UW unit, adc_ctrl_t *hadc,
 	dmsdi.devatr	= TDK_UNDEF;		/* Device attributes */
 	dmsdi.nsub	= 0;			/* Number of sub units */
 	dmsdi.blksz	= 1;			/* Unique data block size (-1 = unknown) */
-	dmsdi.openfn	= dev_adc_openfn;
-	dmsdi.closefn	= dev_adc_closefn;
-	dmsdi.readfn	= dev_adc_readfn;
-	dmsdi.writefn	= dev_adc_writefn;
-	dmsdi.eventfn	= dev_adc_eventfn;
+	dmsdi.openfn	= dev_net_openfn;
+	dmsdi.closefn	= dev_net_closefn;
+	dmsdi.readfn	= dev_net_readfn;
+	dmsdi.writefn	= dev_net_writefn;
+	dmsdi.eventfn	= dev_net_eventfn;
 	
-	knl_strcpy( (char*)dmsdi.devnm, DEVNAME_HAL_ADC);
-	i = knl_strlen(DEVNAME_HAL_ADC);
+	knl_strcpy( (char*)dmsdi.devnm, DEVNAME_HAL_NET);
+	i = knl_strlen(DEVNAME_HAL_NET);
 	dmsdi.devnm[i] = (UB)('a' + unit);
 	dmsdi.devnm[i+1] = 0;
 
 	err = msdi_def_dev( &dmsdi, &idev, &p_msdi);
 	if(err != E_OK) goto err_1;
 
-	p_dcb->hadc	= hadc;
-	p_dcb->cadc	= cadc;
-	p_dcb->cfadc	= cfadc;
 	p_dcb->devid	= p_msdi->devid;
 	p_dcb->unit	= unit;
 	p_dcb->evtmbfid	= idev.evtmbfid;
-
-	return E_OK;
+	p_dcb->rxmbfid	= -1;
+	p_dcb->linkstatus = FALSE;
+	
+	/* Initialize the RX buffer. */
+	QueInit( &p_dcb->freerxbufq );
+	for( i = 0; i < DEV_HAL_RBUF_NUM; i++ ) {
+		QueInsert((QUEUE*)ether_rx_buffers[i], &p_dcb->freerxbufq);
+	}
+	
+	fsp_err = g_ether0.p_api->open(g_ether0.p_ctrl, g_ether0.p_cfg);
+	if( fsp_err == FSP_SUCCESS ) {
+		fsp_err = g_ether0.p_api->callbackSet(g_ether0.p_ctrl, 
+						      HAL_Net_Callback, 
+						      p_dcb,
+						      NULL);
+		if( fsp_err == FSP_SUCCESS ) {
+			g_ether0.p_api->linkProcess(g_ether0.p_ctrl);
+			return E_OK;
+		}
+	}
+	err = E_SYS;
 
 err_1:
 #if TK_SUPPORT_MEMLIB
@@ -272,6 +406,18 @@ err_1:
 #endif
 	return err;
 }
+
+IMPORT ER hal_net_get_link_status( UW unit )
+{
+	T_HAL_NET_DCB	*p_dcb = get_dcb_ptr(unit);
+	if( p_dcb != NULL ) {
+		return E_CTX;
+	}
+	else {
+		return p_dcb->linkstatus ? E_OK : E_NOMDA;
+	}
+}
+	
 
 #endif		/* DEVCNF_USE_HAL_NET */
 #endif		/* MTKBSP_RAFSP */
