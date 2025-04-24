@@ -28,12 +28,20 @@
 #include <hal_data.h>
 #include "hal_net_cnf.h"
 
+#include <tm/tmonitor.h>
+
 LOCAL __attribute__((__aligned__(32)))uint8_t ether_rx_buffers[DEV_HAL_RBUF_NUM][1536]ETHER_BUFFER_PLACE_IN_SECTION;
 
 #define UNUSED(x)		((void *) (x)) 
 
 #define ETHER_FLGPTN_TX_COMPLETE	(1U << 0)
 #define ETHER_FLGPTN_TX_ABORTED		(1U << 1)
+
+/* Transmit Complete. */
+#define ETHER_ISR_EE_TC_MASK              (1U << 21U)
+
+/* Frame Receive. */
+#define ETHER_ISR_EE_FR_MASK              (1U << 18U)
 
 /*
  *	hal_net.c
@@ -103,7 +111,7 @@ LOCAL ER read_atr(T_HAL_NET_DCB *p_dcb, T_DEVREQ *req)
 	default:
 		return E_PAR;
 	}
-	return E_OK;
+	return ercd;
 }
 
 LOCAL ER write_atr(T_HAL_NET_DCB *p_dcb, T_DEVREQ *req)
@@ -142,7 +150,7 @@ LOCAL ER write_atr(T_HAL_NET_DCB *p_dcb, T_DEVREQ *req)
 		return E_PAR;
 	}
 	
-	return E_PAR;
+	return ercd;
 }
 
 /*---------------------------------------------------------------------*/
@@ -164,6 +172,47 @@ LOCAL void HAL_Net_Callback(ether_callback_args_t * p_args)
 	p_dcb = (T_HAL_NET_DCB*)p_args->p_context;
 
 	switch(p_args->event) {
+		case ETHER_EVENT_LINK_ON:
+			tm_printf("Ether link up\n");
+			p_dcb->linkstatus = TRUE;
+			break;
+		case ETHER_EVENT_LINK_OFF:
+			tm_printf("Ether link down\n");
+			p_dcb->linkstatus = FALSE;
+			break;
+#if (ETHER_CFG_KEEP_INTERRUPT_EVENT_BACKWORD_COMPATIBILITY)
+		case ETHER_EVENT_INTERRUPT:
+			if( ETHER_ISR_EE_TC_MASK == (p_args->status_eesr & ETHER_ISR_EE_TC_MASK) ) {
+				tk_set_flg(p_dcb->flgid, ETHER_FLGPTN_TX_COMPLETE);
+			}
+			
+			if( ETHER_ISR_EE_FR_MASK == (p_args->status_eesr & ETHER_ISR_EE_FR_MASK) ) {
+				do {
+					err = g_ether0.p_api->read(g_ether0.p_ctrl, &event.buf, &length);
+					if( err == FSP_SUCCESS ) {
+						pbuf = (void *) QueRemoveNext( &p_dcb->freerxbufq );
+						if( pbuf != NULL ) {
+							event.len = (UH) length;
+							ercd = tk_snd_mbf( p_dcb->rxmbfid, &event, sizeof( NetEvent ), TMO_POL );
+							
+							if(ercd >= E_OK) {
+								g_ether0.p_api->rxBufferUpdate(g_ether0.p_ctrl, pbuf);
+								continue;
+							}
+							else {
+								QueInsert((QUEUE*)pbuf, &p_dcb->freerxbufq);
+							}
+						}
+					}
+					
+					if( err != FSP_ERR_ETHER_ERROR_NO_DATA ) {
+						/* Release current buffer that set to the descriptor. */
+						g_ether0.p_api->bufferRelease(g_ether0.p_ctrl);
+					}
+				} while(FSP_ERR_ETHER_ERROR_NO_DATA != err);
+			}
+			break;
+#else
 		case ETHER_EVENT_TX_COMPLETE:
 			tk_set_flg(p_dcb->flgid, ETHER_FLGPTN_TX_COMPLETE);
 			break;
@@ -195,15 +244,10 @@ LOCAL void HAL_Net_Callback(ether_callback_args_t * p_args)
 				}
 			} while(FSP_ERR_ETHER_ERROR_NO_DATA != err);
 			break;
-		case ETHER_EVENT_LINK_ON:
-			p_dcb->linkstatus = TRUE;
-			break;
-		case ETHER_EVENT_LINK_OFF:
-			p_dcb->linkstatus = FALSE;
-			break;
 		case ETHER_EVENT_ERR_GLOBAL:
 			break;
 		case ETHER_EVENT_RX_MESSAGE_LOST:
+#endif
 		default:
 			break;
 	}
@@ -231,6 +275,14 @@ LOCAL ER write_data(T_HAL_NET_DCB *p_dcb, T_DEVREQ *req)
 		return ((g_ether0.p_cfg->ether_buffer_size > ETH_MAX_FRAME_LENGTH) ? ETH_MAX_FRAME_LENGTH : (ER) g_ether0.p_cfg->ether_buffer_size);
 	}
 	else {
+		if( p_dcb-> linkstatus != TRUE ) {
+			/* Check link status */
+			g_ether0.p_api->linkProcess(g_ether0.p_ctrl);
+			if( p_dcb-> linkstatus != TRUE ) {
+				return E_NOMDA;
+			}
+		}
+		
 		fsp_err = g_ether0.p_api->write(g_ether0.p_ctrl, req->buf, (uint32_t) req->size);
 		if( fsp_err != FSP_SUCCESS ) {
 			return E_IO;
@@ -242,6 +294,8 @@ LOCAL ER write_data(T_HAL_NET_DCB *p_dcb, T_DEVREQ *req)
 				&flgptn, 
 				DEV_HAL_NET_TMOUT);
 		if( er < E_OK ) {
+			/* Check link status */
+			g_ether0.p_api->linkProcess(g_ether0.p_ctrl);
 			return er;
 		}
 		else if( (flgptn & ETHER_FLGPTN_TX_ABORTED) != 0 ) {
@@ -380,6 +434,7 @@ EXPORT ER dev_init_hal_net( UW unit )
 	p_dcb->evtmbfid	= idev.evtmbfid;
 	p_dcb->rxmbfid	= -1;
 	p_dcb->linkstatus = FALSE;
+	p_dcb->initialized = FALSE;
 	
 	/* Initialize the RX buffer. */
 	QueInit( &p_dcb->freerxbufq );
@@ -394,6 +449,9 @@ EXPORT ER dev_init_hal_net( UW unit )
 						      p_dcb,
 						      NULL);
 		if( fsp_err == FSP_SUCCESS ) {
+			p_dcb->initialized = TRUE;
+			
+			/* Check link status */
 			g_ether0.p_api->linkProcess(g_ether0.p_ctrl);
 			return E_OK;
 		}
@@ -410,10 +468,14 @@ err_1:
 IMPORT ER hal_net_get_link_status( UW unit )
 {
 	T_HAL_NET_DCB	*p_dcb = get_dcb_ptr(unit);
-	if( p_dcb != NULL ) {
+	if( p_dcb == NULL || p_dcb->initialized == FALSE ) {
 		return E_CTX;
 	}
 	else {
+		if( p_dcb->linkstatus!= TRUE ) {
+			/* Check link status */
+			g_ether0.p_api->linkProcess(g_ether0.p_ctrl);
+		}
 		return p_dcb->linkstatus ? E_OK : E_NOMDA;
 	}
 }
