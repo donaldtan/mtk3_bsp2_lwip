@@ -275,7 +275,7 @@ LOCAL ER write_data(T_HAL_NET_DCB *p_dcb, T_DEVREQ *req)
 		return ((g_ether0.p_cfg->ether_buffer_size > ETH_MAX_FRAME_LENGTH) ? ETH_MAX_FRAME_LENGTH : (ER) g_ether0.p_cfg->ether_buffer_size);
 	}
 	else {
-		if( p_dcb-> linkstatus != TRUE ) {
+		if( p_dcb->linkstatus != TRUE ) {
 			/* Check link status */
 			g_ether0.p_api->linkProcess(g_ether0.p_ctrl);
 			if( p_dcb-> linkstatus != TRUE ) {

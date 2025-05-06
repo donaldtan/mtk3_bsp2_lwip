@@ -53,6 +53,7 @@
 #include <tk/tkernel.h>
 #include <sys/sysdef.h>
 #include <tk/syslib.h>
+#include <hal_net_cnf.h>
 #include <hal_net.h>
 
 #include "lwip/opt.h"
@@ -80,9 +81,9 @@
 #define ETHER_DRV_BUFF_SIZE    1520
 #endif
 
-#define ROUNDUP(x)	(((x) + (ETHER_BUF_ALIGNMENT-1)) & ~(ETHER_BUF_ALIGNMENT-1))
+#define ROUNDUP(x)	(((x) + (ETHER_DRV_BUFF_ALIGNMENT-1)) & ~(ETHER_DRV_BUFF_ALIGNMENT-1))
 
-#if LWIP_NETDRV_NO_SETUP_RXBUF
+#if ETHER_DRV_NO_SETUP_RXBUF
 #define DMAC_MPL_SIZE	(2 * 1024)
 #else
 #define DMAC_MPL_SIZE	((ETHER_DRV_MAX_RBUFF + 1) * 2048)
@@ -138,6 +139,7 @@ const static ip6_addr_t allnodes[2] = {
 	{ { PP_HTONL(0xff020000), PP_HTONL(0), PP_HTONL(0), PP_HTONL(1) } IPADDR6_ZONE_INIT }};
 #endif
 
+#if !ETHER_DRV_NO_SETUP_RXBUF
 static void netif_ether_pbuf_free(struct pbuf* p)
 {
   struct pbuf_ether* pe = (struct pbuf_ether*)p;
@@ -146,14 +148,15 @@ static void netif_ether_pbuf_free(struct pbuf* p)
   
   er = tk_swri_dev(pe->devid, DN_NETRXBUF, &(pe->base), sizeof(void*), &asz);
   LWIP_ASSERT("netif_ether_pbuf_free: tk_swri_dev failed.\n", er >= E_OK);
-} 
+}
+#endif
 
 /* Forward declarations. */
 static void rx_task(UINT stacd, void *exinf);
 
 static ER low_level_set_multicast_address(struct tknetif *ethernetif)
 {
-  NetAddr *faddr = mem_malloc(sizeof(NetAddr) * ethernetif->multicast_group_cnt);
+  NetAddr *faddr = mem_malloc((mem_size_t) (sizeof(NetAddr) * ethernetif->multicast_group_cnt));
   struct mac_filter_item *p = ethernetif->multicast_list;
   ER ercd = E_OK;
   UW i;
@@ -187,7 +190,7 @@ static ER low_level_set_multicast_address(struct tknetif *ethernetif)
       p = p->next;
     }
 
-    ercd = tk_swri_dev(ethernetif->ethdevid, DN_SET_MCAST_LIST, faddr, i, &asize);
+    ercd = tk_swri_dev(ethernetif->ethdevid, DN_SET_MCAST_LIST, faddr, (SZ) i, &asize);
     mem_free(faddr);
   }
   else{
@@ -216,7 +219,7 @@ tknetif_igmp_mac_filter(struct netif *netif,
   // Add or Delete ipv4 group address entry.
   if(action == NETIF_DEL_MAC_FILTER){
     p = ethernetif->multicast_list;
-    asize = ethernetif->multicast_group_cnt;
+    asize = (W) ethernetif->multicast_group_cnt;
 
     if( p != NULL && IP_IS_V4(&p->grp_addr) && (memcmp(ip_2_ip4(&p->grp_addr), group, sizeof(ip4_addr_t)) == 0) ){
       ethernetif->multicast_list = p->next;
@@ -406,14 +409,17 @@ static void
 low_level_init(int ch, struct netif *netif)
 {
   NetAddr macaddr;
+#if !ETHER_DRV_NO_SETUP_RXBUF
   NetRxBufSz bufsz;
+  W i;
+#endif
   T_CMBF cmbf;
   struct tknetif *ethernetif = netif->state;
-  W i, asize;
+  W asize;
   void *ptr;
   ER ercd;
   T_CMPL cmpl;
-  UB devnm[] = {'n', 'e', 't', 'a' + ch, 0};
+  UB devnm[] = {'n', 'e', 't', (UB) ('a' + ch), 0};
 
   /* Create memory pool for receive buffer. */
   cmpl.exinf = 0;
@@ -445,14 +451,14 @@ low_level_init(int ch, struct netif *netif)
   ethernetif->mplid = tk_cre_mpl(&cmpl);
   LWIP_ASSERT("Error: cannot create memory pool.\n", ethernetif->mplid >= E_OK );
 
-#ifndef LWIP_NETDRV_TXBUF_RESERVED_SIZE  
-  ercd = tk_get_mpl(ethernetif->mplid, ETHER_DRV_BUFF_SIZE + ETHER_BUF_ALIGNMENT, (void **) &ptr, TMO_POL);
+#ifndef ETHER_DRV_TXBUF_RESERVED_SIZE  
+  ercd = tk_get_mpl(ethernetif->mplid, ETHER_DRV_BUFF_SIZE + ETHER_DRV_BUFF_ALIGNMENT, (void **) &ptr, TMO_POL);
   LWIP_ASSERT("Error: cannot allocate memory from memory pool.\n", ercd >= E_OK );
   ethernetif->output_buf = (void *) ROUNDUP((UW) ptr);
 #else
-  ercd = tk_get_mpl(ethernetif->mplid, ETHER_DRV_BUFF_SIZE + LWIP_NETDRV_TXBUF_RESERVED_SIZE + ETHER_BUF_ALIGNMENT, (void **) &ptr, TMO_POL);
+  ercd = tk_get_mpl(ethernetif->mplid, ETHER_DRV_BUFF_SIZE + ETHER_DRV_TXBUF_RESERVED_SIZE + ETHER_DRV_BUFF_ALIGNMENT, (void **) &ptr, TMO_POL);
   LWIP_ASSERT("Error: cannot allocate memory from memory pool.\n", ercd >= E_OK );
-  ethernetif->output_buf = (void *) (ROUNDUP((UW) ptr) + LWIP_NETDRV_TXBUF_RESERVED_SIZE);
+  ethernetif->output_buf = (void *) (ROUNDUP((UW) ptr) + ETHER_DRV_TXBUF_RESERVED_SIZE);
 #endif
   
   /* set MAC hardware address length */
@@ -502,7 +508,7 @@ low_level_init(int ch, struct netif *netif)
   ercd = tk_swri_dev(ethernetif->ethdevid, DN_NETEVENT, &ethernetif->rxmbfid, sizeof(ID), &asize);
   LWIP_ASSERT("Error: cannot set message buffer id.\n", ercd >= E_OK);
   
-#if !LWIP_NETDRV_NO_SETUP_RXBUF
+#if !ETHER_DRV_NO_SETUP_RXBUF
   bufsz.minsz = 60;
   bufsz.maxsz = ETHER_DRV_BUFF_SIZE;
   ercd = tk_swri_dev(ethernetif->ethdevid, DN_NETRXBUFSZ, &bufsz, sizeof( bufsz ), &asize);
@@ -510,7 +516,7 @@ low_level_init(int ch, struct netif *netif)
   
   /* Set receive buffer to net driver. */
   for(i = 0; i < ETHER_DRV_MAX_RBUFF; i++){
-    ercd = tk_get_mpl(ethernetif->mplid, ETHER_DRV_BUFF_SIZE + ETHER_BUF_HEADER_SIZE + ETHER_BUF_ALIGNMENT, (void **) &ethernetif->drv_buf[i], TMO_POL);
+    ercd = tk_get_mpl(ethernetif->mplid, ETHER_DRV_BUFF_SIZE + ETHER_BUF_HEADER_SIZE + ETHER_DRV_BUFF_ALIGNMENT, (void **) &ethernetif->drv_buf[i], TMO_POL);
     if(ercd >= E_OK){
       ptr = (void *) ROUNDUP((UW) ethernetif->drv_buf[i]) + ETHER_BUF_HEADER_SIZE;
       ercd = tk_swri_dev(ethernetif->ethdevid, DN_NETRXBUF, &ptr, sizeof( void * ), &asize);
@@ -584,14 +590,15 @@ static struct pbuf *
 low_level_input(struct netif *netif)
 {
   struct tknetif *ethernetif = netif->state;
-  struct pbuf_ether *pe;
   struct pbuf *p;
   NetEvent event;
   u16_t len;
-  void *buf;
   ER ercd;
-#if LWIP_NETDRV_NO_SETUP_RXBUF
+#if ETHER_DRV_NO_SETUP_RXBUF
   W asize;
+#else
+  struct pbuf_ether *pe;
+  void *buf;
 #endif
 
   /* Obtain the size of the packet and put it into the "len"
@@ -607,7 +614,7 @@ low_level_input(struct netif *netif)
   len += ETH_PAD_SIZE; /* allow room for Ethernet padding */
 #endif
 
-#if !LWIP_NETDRV_NO_SETUP_RXBUF
+#if !ETHER_DRV_NO_SETUP_RXBUF
   pe = (struct pbuf_ether *) (((UW) event.buf) - ETHER_BUF_HEADER_SIZE);
 
 #if ETH_PAD_SIZE
@@ -647,7 +654,7 @@ low_level_input(struct netif *netif)
   }
   tk_swri_dev(ethernetif->ethdevid, DN_NETRXBUF, &event.buf, sizeof( void * ), &asize);
   
-#endif	/* LWIP_NETDRV_NO_SETUP_RXBUF */
+#endif	/* ETHER_DRV_NO_SETUP_RXBUF */
 
   return p;  
 }
@@ -700,8 +707,9 @@ tknetif_input(struct netif *netif)
 }
 
 static void 
-rx_task(UINT, void *exinf)
-{ 
+rx_task(UINT stacd, void *exinf)
+{
+  LWIP_UNUSED_ARG(stacd);	
   do{
     tknetif_input(exinf);
   }while(1);
@@ -735,7 +743,7 @@ tknetif_init_impl(int ch, struct netif *netif)
   NETIF_INIT_SNMP(netif, snmp_ifType_ethernet_csmacd, NETIF_LINK_SPEED);
 
   netif->state = ethernetif;
-  netif->name[0] = IFNAME0 + ch;
+  netif->name[0] = (char) (IFNAME0 + ch);
   netif->name[1] = IFNAME1;
   /* We directly use etharp_output() here to save a function call.
    * You can instead declare your own function an call etharp_output()
