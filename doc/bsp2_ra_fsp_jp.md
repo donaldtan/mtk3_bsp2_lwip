@@ -1,7 +1,7 @@
 # μT-Kernel 3.0 BSP2 ユーザーズマニュアル <!-- omit in toc -->
 ## RA FSP編 <!-- omit in toc -->
 ## Version 01.00.B7 <!-- omit in toc -->
-## 2025.04.30 <!-- omit in toc -->
+## 2025.05.07 <!-- omit in toc -->
 
 - [1. 概要](#1-概要)
   - [1.1. 対象マイコンボード](#11-対象マイコンボード)
@@ -62,8 +62,8 @@
 また、ファームウェアとして、FSP(Flexible Software Package )を使用します。  
 本書では以下のバージョンで動作を確認しています。  
 
-`Renesas e² studio Version: 2024-10 (24.10.0)`  
-`FSP version 5.6.0`  
+`Renesas e² studio Version: 2025-04 (25.4.0)`  
+`FSP version 5.9.0`  
 
 詳しくは以下のWebサイトをご覧ください。
 
@@ -565,38 +565,39 @@ ER hal_***_write_reg(    // SCI_I2Cの場合はhal_sci_i2c_write_reg
  - EK-RA8D1ボードの場合は、ボード上のスイッチSW1-3をOFF（デフォルトはON）、SW1-5をON（デフォルトはOFF）にして、`ETHER_RMII`の`Pin Group Selection`を`_B only`にします。
 
 **注意**  
-- 使用するPHYを有効にするために定められたポート出力が必要な場合があります。各ボードのマニュアルをご覧ください。
+- 使用するPHYを有効にするために定められたポート出力が必要な場合があります。各ボードのマニュアルをご覧ください。  
 
   (例) EK-RA8M1ボードの場合  
 
-| 端子   | 設定                         |
-| ---- | -------------------------- |
-| P115 | Output mode (Initial High)  |
+  | 端子   | 設定                         |
+  | ---- | -------------------------- |
+  | P404 | Output mode (Initial High)  |
 
-  (例) EK-RAD1の場合
+  (例) EK-RA8D1ボードの場合
 
-| 端子   | 設定                         |
-| ---- | -------------------------- |
-| PA13 | Output mode (Initial Low)  |
+  | 端子   | 設定                         |
+  | ---- | -------------------------- |
+  | PA13 | Output mode (Initial Low)  |
+  | P706 | Output mode (Initial High) |
 
-(2) HALの設定
+(2) HALの設定  
 `Stacks Configuration`で、`New Stack` → `Networking`から対象のEthernet(r_ether)を選択し、各項目を以下のように設定します。
 
-(例) EK-RA8M1/EK-RA8D1の場合  
-Ethernet(r_ether)を選択し、プロパティの`Module ｇ_ether0 Ethernet(r_ether)`の各項目を以下のように設定します。  
+- EK-RA8M1/EK-RA8D1の場合  
+  Ethernet(r_ether)を選択し、プロパティの`Module ｇ_ether0 Ethernet(r_ether)`の各項目を以下のように設定します。  
+  
+  | 項目                | 設定                         |
+  | ------------------ | -------------------------- |
+  | General/Zero-copy Mode | Enable |
+  | Buffers/Number of RX buffer | 8            |
+  | その他              | 初期値のまま                     |
 
-| 項目                | 設定                         |
-| ------------------ | -------------------------- |
-| General/Zero-copy Mode | Enable |
-| Buffers/Number of RX buffer | 8            |
-| その他              | 初期値のまま                     |
+  Ethernet(r_ether_phy)を選択し、プロパティの`Module ｇ_ether_phy0 Ethernet(r_ether_phy)`の各項目を以下のように設定します。 
 
-Ethernet(r_ether_phy)を選択し、プロパティの`Module ｇ_ether_phy0 Ethernet(r_ether_phy)`の各項目を以下のように設定します。 
-
-| 項目                | 設定                         |
-| ------------------ | -------------------------- |
-| PHY-LSI Address | 5 |
-| その他              | 初期値のまま                     |
+  | 項目                | 設定                         |
+  | ------------------ | -------------------------- |
+  | PHY-LSI Address | 5 |
+  | その他              | 初期値のまま                     |
 
 (3) デバイスドライバの初期化  
 ネットデバイスドライバを使用するにあたり、最初にネットデバイスドライバ初期化関数で初期化を行います。これにより、指定したHALが関連付けられたI2Cデバイスドライバが生成されます。本関数は以下のように定義されます。  
@@ -800,10 +801,10 @@ gitのコマンドを使用する場合は、プロジェクトのディレク�
 `Exclude resource from build`にチェックが入っている場合は外してください。
 
 lwIPライブラリを利用する場合は、以下のフォルダ及びファイルをビルド対象外に設定してください。
-```mtk3_bsp2/lib/liblwip/src/lwip/contrib```
-```mtk3_bsp2/lib/liblwip/src/lwip/doc```
-```mtk3_bsp2/lib/liblwip/src/lwip/test```
-```mtk3_bsp2/lib/liblwip/src/lwip/src/apps/http/makefsdata```
+```mtk3_bsp2/lib/liblwip/src/lwip/contrib```  
+```mtk3_bsp2/lib/liblwip/src/lwip/doc```  
+```mtk3_bsp2/lib/liblwip/src/lwip/test```  
+```mtk3_bsp2/lib/liblwip/src/lwip/src/apps/http/makefsdata```  
 ```mtk3_bsp2/lib/liblwip/src/lwip/src/apps/http/fsdata.c```  
 lwIPライブラリを利用しない場合は`mtk3_bsp2/lib/liblwip`全体をビルド対象外に設定してください。
 
@@ -967,7 +968,8 @@ EXPORT INT usermain(void)
 
 | 版数      | 日付         | 内容                                                      |
 | ------- | ---------- | ------------------------------------------------------- |
-| 1.00.B6 | 2024.12.20 | 対応ボードにEK-RA8D1を追加。関連情報の記載
+| 1.00.B7 | 2025.05.07 | ネットデバイスの説明を追加 |
+| 1.00.B6 | 2024.12.20 | 対応ボードにEK-RA8D1を追加。関連情報の記載 |
 | 1.00.B5 | 2024.09.05 | 対応ボードにRA4M1 Clickerを追加。関連情報の記載                          |
 | 1.00.B4 | 2024.05.24 | 誤記修正                                                    |
 | 1.00.B3 | 2024.04.10 | I2Cデバイスの説明を補足                                           |
