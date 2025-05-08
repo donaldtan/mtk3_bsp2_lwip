@@ -1,7 +1,7 @@
 # μT-Kernel 3.0 BSP2 ユーザーズマニュアル <!-- omit in toc -->
 ## RA FSP編 <!-- omit in toc -->
-## Version 01.00.B6 <!-- omit in toc -->
-## 2024.12.20 <!-- omit in toc -->
+## Version 01.00.B7 <!-- omit in toc -->
+## 2025.05.07 <!-- omit in toc -->
 
 - [1. 概要](#1-概要)
   - [1.1. 対象マイコンボード](#11-対象マイコンボード)
@@ -19,6 +19,10 @@
   - [3.2. I2Cデバイスドライバ](#32-i2cデバイスドライバ)
     - [3.2.1. 概要](#321-概要)
     - [3.2.2. デバイスドライバの使用方法](#322-デバイスドライバの使用方法)
+  - [3.3. ネットデバイスドライバ](#33-ネットデバイスドライバ)
+    - [3.3.1. 概要](#331-概要)
+    - [3.3.2. デバイスドライバの使用方法](#332-デバイスドライバの使用方法)
+    - [3.3.3. ネットプログラム例](#333-ネットプログラム例)
 - [4. プログラムの作成手順](#4-プログラムの作成手順)
   - [4.1. e2studioによるプロジェクト作成](#41-e2studioによるプロジェクト作成)
   - [4.2. μT-Kernel 3.0 BSP2の組込み](#42-μt-kernel-30-bsp2の組込み)
@@ -58,8 +62,8 @@
 また、ファームウェアとして、FSP(Flexible Software Package )を使用します。  
 本書では以下のバージョンで動作を確認しています。  
 
-`Renesas e² studio Version: 2024-10 (24.10.0)`  
-`FSP version 5.6.0`  
+`Renesas e² studio Version: 2025-04 (25.4.0)`  
+`FSP version 5.9.0`  
 
 詳しくは以下のWebサイトをご覧ください。
 
@@ -525,6 +529,228 @@ ER hal_***_write_reg(    // SCI_I2Cの場合はhal_sci_i2c_write_reg
 );
 ```
 
+## 3.3. ネットデバイスドライバ
+### 3.3.1. 概要
+ネットデバイスドライバは、マイコン内蔵のイーサーネットMACコントローラを制御することができます。  
+本BSPでは以下のデバイスに対応したネットデバイスドライバがあります。  
+
+| デバイス名 | BSPのデバイス名 | 説明                  |
+| ----- | --------- | ------------------- |
+| ETHERC | ether0      | イーサーネットMACコントローラ |
+
+デバイスドライバは内部の処理でFSPのHALを利用します。本デバイスドライバはFSPののHALをμT-Kernel 3.0 で使用する方法を示すサンプルプログラムであり、デバイスの基本的な機能のみに対応しています。  
+以下にネットデバイスドライバのソースコードがあります。  
+
+```mtk3_bsp2\sysdepend\ra_fsp\device\hal_net```
+
+このデバイスドライバはBSPコンフィギュレーションファイル (config/config_bsp/ra_fsp/config_bsp.h) の以下を変更しビルドすることにより、使用・不使用を切り替えられます。
+
+```C
+/* ------------------------------------------------------------------------ */
+/* Device usage settings
+ *	1: Use   0: Do not use
+ */
+#define DEVCNF_USE_HAL_NET		0	// Net device
+```
+
+ネットデバイスドライバはFSPのHALを使用していますので、イーサーネットのHALを使用可能にしてください。HALと本デバイスドライバの関連付けは次項で説明します。 
+
+# 3.3.2. デバイスドライバの使用方法
+(1) イーサーネット(ハードウェア)の設定  
+ネットデバイスドライバから使用するイーサーネットの設定をe2studioで行います。  
+`Pin Configuration`の`Peripherals`の`Connectivity:ETHER_RMII`の`ETHER_RMII`から、使用する端子を一括に設定します。  
+
+(参考) 各ボードのマイコンのETHER_RMII端子の設定は、以下のようにする必要があります。  
+ - EK-RA8M1ボードの場合は、ボードのJ61を短絡（デフォルトは短絡）にして、`ETHER_RMII`の`Pin Group Selection`を`_A only`にします。
+ - EK-RA8D1ボードの場合は、ボード上のスイッチSW1-3をOFF（デフォルトはON）、SW1-5をON（デフォルトはOFF）にして、`ETHER_RMII`の`Pin Group Selection`を`_B only`にします。
+
+**注意**  
+- 使用するPHYを有効にするために定められたポート出力が必要な場合があります。各ボードのマニュアルをご覧ください。  
+
+  (例) EK-RA8M1ボードの場合  
+
+  | 端子   | 設定                         |
+  | ---- | -------------------------- |
+  | P404 | Output mode (Initial High)  |
+
+  (例) EK-RA8D1ボードの場合
+
+  | 端子   | 設定                         |
+  | ---- | -------------------------- |
+  | PA13 | Output mode (Initial Low)  |
+  | P706 | Output mode (Initial High) |
+
+(2) HALの設定  
+`Stacks Configuration`で、`New Stack` → `Networking`から対象のEthernet(r_ether)を選択し、各項目を以下のように設定します。
+
+- EK-RA8M1/EK-RA8D1の場合  
+  Ethernet(r_ether)を選択し、プロパティの`Module ｇ_ether0 Ethernet(r_ether)`の各項目を以下のように設定します。  
+  
+  | 項目                | 設定                         |
+  | ------------------ | -------------------------- |
+  | General/Zero-copy Mode | Enable |
+  | Buffers/Number of RX buffer | 8            |
+  | その他              | 初期値のまま                     |
+
+  Ethernet(r_ether_phy)を選択し、プロパティの`Module ｇ_ether_phy0 Ethernet(r_ether_phy)`の各項目を以下のように設定します。 
+
+  | 項目                | 設定                         |
+  | ------------------ | -------------------------- |
+  | PHY-LSI Address | 5 |
+  | その他              | 初期値のまま                     |
+
+(3) デバイスドライバの初期化  
+ネットデバイスドライバを使用するにあたり、最初にネットデバイスドライバ初期化関数で初期化を行います。これにより、指定したHALが関連付けられたI2Cデバイスドライバが生成されます。本関数は以下のように定義されます。  
+
+```C
+ER dev_init_hal_net( 
+      UW unit         // デバイスのユニット番号(0)
+);
+```
+
+パラメータunitは0固定となります。
+初期化に成功するとデバイス名`neta`のデバイスドライバが生成されます。
+
+μT-Kernel 3.0 BSP2の起動処理の`knl_start_device`関数にてデバイスドライバの初期化を行っています。knl_start_device関数は以下のファイルに記述されています。   
+
+`mtk3_bsp2/sysdepend/ra_fsp/devinit.c`
+
+以下にknl_start_device関数の内容を示します。ここではHALに関連図けられたμT-Kernel 3.0のデバイスドライバが生成されます。
+実際に使用するFSP(HAL)に応じて指定を変更してください。  
+
+```C
+ER knl_start_device( void )
+{
+	ER	err	= E_OK;
+
+  ...
+
+#if DEVCNF_USE_HAL_NET
+	err = dev_init_hal_net( 0 );
+#endif
+        // 以下省略
+}
+```
+
+(4) デバイスドライバの操作  
+μT-Kernel 3.0のデバイス管理APIにより、デバイスドライバを操作できます。APIの詳細はμT-Kernel 3.0仕様書を参照してください。    
+本ドライバはオープンソースのTCP/IPプロトコルスタックの実装`lwIP`を動作させるための最小限の実装となり、イーサーネットを利用した通信を行う場合はlwIPのAPIを利用します。`lwIP`の詳細については以下のサイトを参照してください。
+
+lwIP - A Lightweight TCP/IP stack  
+https://savannah.nongnu.org/projects/lwip/
+
+lwIPのビルドオプションについては、以下のヘッダーファイルから調整できます。
+```mtk3_bsp2/sysdepend/ra_fsp/lib/liblwip/include/lwipopts.h```
+
+(5) イーサーネットの接続状態のチェック  
+イーサーネットの接続状態は以下の関数から取得できます。 
+
+```C
+ER hal_net_get_link_status( UW unit );
+```
+`UW unit`はデバイスのユニット番号を示します。EK-RA8M1及びEK-RA8D1の場合は常に`0`を渡してください。
+マイコンボードのイーサー端子がネットに接続している場合は、戻り値がE_OKでそれ以外の場合はエラーコードが返却します。
+
+# 3.3.3. ネットプログラム例
+以下にネットドライバとlwIPを用いたネットプログラムの例を示します。
+このサンプルでは、DHCPによってIPアドレスを初期化した後、デバイスボードにHTTPサーバーを立ち上げます。同じローカルネットのPCから`ping`コマンドや、ブラウザーからアクセスできます。
+
+```C
+#include <tk/tkernel.h>
+#include <tm/tmonitor.h>
+
+#include "lwip/api.h"
+#include "lwip/init.h"
+#include "lwip/tcpip.h"
+#include "lwip/dhcp.h"
+#include "netif/etharp.h"
+#include "netif/tknetif.h"
+#include "lwip/apps/httpd.h"
+#include "lwip/apps/lwiperf.h"
+#include <hal_net.h>
+
+struct netif tknetif;
+
+static void tcpip_init_done(void *arg)
+{
+	tk_wup_tsk((ID) arg);
+}
+
+/* usermain関数 */
+EXPORT  INT usermain( void )
+{
+	ip_addr_t ipaddr, netmask, gw;
+	W mscnt, link_stat, dhcp_stat = 0;
+	W link_cnt;
+
+	link_cnt = 100;
+	do{
+		link_cnt --;
+		link_stat = hal_net_get_link_status( 0 );
+		tk_dly_tsk(100);
+	} while(link_stat < E_OK && link_cnt > 0);
+	
+	if (link_stat == E_OK) {
+		tm_printf("Ether link up cast %d.%d S.\n", (100 - link_cnt) / 10,  (100 - link_cnt) % 10);
+	}
+
+	tcpip_init(tcpip_init_done, (void *) tk_get_tid());
+	tk_slp_tsk(TMO_FEVR);
+
+	mscnt = 0;
+	IP4_ADDR(&gw, 0, 0, 0, 0);
+	IP4_ADDR(&ipaddr, 0, 0, 0, 0);
+	IP4_ADDR(&netmask, 0, 0, 0, 0);
+
+	netif_add(&tknetif, &ipaddr, &netmask, &gw, NULL, tknetif_init, tcpip_input);
+	netif_set_default(&tknetif);
+	netif_set_up(&tknetif);
+	tm_printf((UB *) "dhcp_start(&tknetif)\n");
+	dhcp_start(&tknetif);
+
+	while((dhcp_stat & 0x01) == 0){
+		tk_dly_tsk(DHCP_FINE_TIMER_MSECS);
+		if(tknetif.ip_addr.addr && (tknetif.ip_addr.addr != ipaddr.addr)){
+			tm_printf((UB *) "Neta DHCP result:\n");
+			tm_printf((UB *) "        IP Address: %d.%d.%d.%d\n", 
+			ip4_addr1(&tknetif.ip_addr), 
+			ip4_addr2(&tknetif.ip_addr), 
+			ip4_addr3(&tknetif.ip_addr), 
+			ip4_addr4(&tknetif.ip_addr));
+			ipaddr.addr = tknetif.ip_addr.addr;
+			tm_printf((UB *) "       Subnet Mask: %d.%d.%d.%d\n", 
+			ip4_addr1(&tknetif.netmask), 
+			ip4_addr2(&tknetif.netmask), 
+			ip4_addr3(&tknetif.netmask), 
+			ip4_addr4(&tknetif.netmask));
+			tm_printf((UB *) "   Default Gateway: %d.%d.%d.%d\n", 
+			ip4_addr1(&tknetif.gw), 
+			ip4_addr2(&tknetif.gw), 
+			ip4_addr3(&tknetif.gw), 
+			ip4_addr4(&tknetif.gw));
+			dhcp_stat |= 0x01;
+
+			break;
+		}
+		mscnt += DHCP_FINE_TIMER_MSECS;
+		if (mscnt >= DHCP_COARSE_TIMER_SECS*1000) {
+			tm_printf((UB *) "Neta DHCP timeout.\n");
+			break;
+		}
+	}
+
+	/* Initialize httpserver */
+	if(dhcp_stat & 0x01){
+		tm_printf((UB *) "httpd_init() Start.\n");
+		httpd_init();
+	}
+
+	do{
+		tk_dly_tsk(1000);
+	} while(1);
+}
+```
+
 # 4. プログラムの作成手順
 e2studioでプログラムのプロジェクトを作成し、μT-Kenrel 3.0 BSP2を組み込んでビルド、実行までの手順を説明します。　　
 e2studioにはRAマイコン用のFSPがインストールされていることが前提です。  
@@ -572,7 +798,15 @@ gitのコマンドを使用する場合は、プロジェクトのディレク�
 μT-Kernel 3.0 BSP2はμT-Kernel 3.0のリポジトリをgitのサブモジュールとして内包していますので、全ソースコードを取得するには--recursiveが必要となります。  
 
 取り込んだμT-Kernel 3.0 BSP2のディレクトリは、e2studioのビルド対象外の設定になっている可能性がありますので、プロパティを変更します。  
-`Exclude resource from build`にチェックが入っている場合は外してください。  
+`Exclude resource from build`にチェックが入っている場合は外してください。
+
+lwIPライブラリを利用する場合は、以下のフォルダ及びファイルをビルド対象外に設定してください。
+```mtk3_bsp2/lib/liblwip/src/lwip/contrib```  
+```mtk3_bsp2/lib/liblwip/src/lwip/doc```  
+```mtk3_bsp2/lib/liblwip/src/lwip/test```  
+```mtk3_bsp2/lib/liblwip/src/lwip/src/apps/http/makefsdata```  
+```mtk3_bsp2/lib/liblwip/src/lwip/src/apps/http/fsdata.c```  
+lwIPライブラリを利用しない場合は`mtk3_bsp2/lib/liblwip`全体をビルド対象外に設定してください。
 
 ### 4.2.2. ビルド設定の追加
 プロジェクトのプロパティに、μT-Kernel 3.0 BSP2のスースコードをビルドするための設定を追加します。  
@@ -599,6 +833,13 @@ gitのコマンドを使用する場合は、プロジェクトのディレク�
 "${workspace_loc:/${ProjName}/mtk3_bsp2/config}"
 "${workspace_loc:/${ProjName}/mtk3_bsp2/include}"
 "${workspace_loc:/${ProjName}/mtk3_bsp2/mtkernel/kernel/knlinc}"
+```
+
+lwIPライブラリを利用する場合は[Include paths]に以下を追加で設定してください。
+```
+"${workspace_loc:/${ProjName}/mtk3_bsp2/lib/liblwip/include}"
+"${workspace_loc:/${ProjName}/mtk3_bsp2/lib/liblwip/src/lwip/src/include}"
+"${workspace_loc:/${ProjName}/mtk3_bsp2/sysdepend/ra_fsp/device/hal_net}"
 ```
 
 (3) [GNU Arm Cross Assembler]→[Preprocessor]  
@@ -727,7 +968,8 @@ EXPORT INT usermain(void)
 
 | 版数      | 日付         | 内容                                                      |
 | ------- | ---------- | ------------------------------------------------------- |
-| 1.00.B6 | 2024.12.20 | 対応ボードにEK-RA8D1を追加。関連情報の記載
+| 1.00.B7 | 2025.05.07 | ネットデバイスの説明を追加 |
+| 1.00.B6 | 2024.12.20 | 対応ボードにEK-RA8D1を追加。関連情報の記載 |
 | 1.00.B5 | 2024.09.05 | 対応ボードにRA4M1 Clickerを追加。関連情報の記載                          |
 | 1.00.B4 | 2024.05.24 | 誤記修正                                                    |
 | 1.00.B3 | 2024.04.10 | I2Cデバイスの説明を補足                                           |

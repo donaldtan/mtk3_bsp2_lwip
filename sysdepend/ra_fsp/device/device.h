@@ -37,4 +37,8 @@
 #include <sysdepend/ra_fsp/device/hal_i3c_i2c/hal_i3c_i2c.h>
 #endif
 
+#if DEVCNF_USE_HAL_NET
+#include <sysdepend/ra_fsp/device/hal_net/hal_net.h>
+#endif
+
 #endif	/* _DEV_HAL_DEVICE_H_ */
