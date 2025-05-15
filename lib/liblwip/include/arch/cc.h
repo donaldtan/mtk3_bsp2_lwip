@@ -103,7 +103,9 @@ typedef		u32_t		mem_ptr_t;
 #endif
 #endif // BYTE_ORDER
 
+#if defined(_IN_ADDR_T_DECLARED)
 #define IN_ADDR_T_DEFINED
+#endif
 
 #if defined(__GNUC__)
 	#define PACK_STRUCT_FIELD(x)	x
