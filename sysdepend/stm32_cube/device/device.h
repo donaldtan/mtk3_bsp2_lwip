@@ -47,4 +47,8 @@
 #include <sysdepend/stm32_cube/device/hal_adc/hal_adc.h>
 #endif
 
+#if DEVCNF_USE_HAL_NET
+#include <sysdepend/stm32_cube/device/hal_net/hal_net.h>
+#endif
+
 #endif	/* _DEV_HAL_DEVICE_H_ */
