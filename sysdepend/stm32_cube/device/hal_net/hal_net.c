@@ -27,12 +27,59 @@
 #include <mtkernel/device/common/drvif/msdrvif.h>
 #include "hal_net_cnf.h"
 
+#define PHYDEF_PATH_(a)		#a
+#define PHYDEF_PATH(a)		SYSDEF_PATH_(a)
+#define PHYDEF_SYSDEP()		SYSDEF_PATH(TARGET_DIR/phy.h)
+#include PHYDEF_SYSDEP()
+
 #include <tm/tmonitor.h>
 
 LOCAL __attribute__((__aligned__(ETHER_DRV_BUFF_ALIGNMENT)))uint8_t ether_rx_buffers[DEV_HAL_RBUF_NUM][1536];
 
 #define ETHER_FLGPTN_TX_COMPLETE	(1U << 0)
 #define ETHER_FLGPTN_TX_ABORTED		(1U << 1)
+
+/**************************************************************************/
+/* Cache maintenance. */
+/**************************************************************************/
+#if defined(__CORTEX_M)
+#if (defined (__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U))
+#define invalidate_cache_by_addr(__ptr__, __size__)                  SCB_InvalidateDCache_by_Addr((void *)(__ptr__), (int32_t)(__size__))
+#define clean_cache_by_addr(__ptr__, __size__)                       SCB_CleanDCache_by_Addr((uint32_t *)(__ptr__), (int32_t)(__size__))
+#else
+#define invalidate_cache_by_addr(__ptr__, __size__)
+#define clean_cache_by_addr(__ptr__, __size__)
+#endif
+#else
+#if defined(DATA_CACHE_ENABLE) && (DATA_CACHE_ENABLE == 1U)
+__STATIC_FORCEINLINE void __invalidate_cache_by_addr(uint32_t start, uint32_t size)
+{
+  uint32_t current = start & ~31U;
+  uint32_t end = (start + size + 31U) & ~31U;
+  while (current < end)
+  {
+    L1C_CleanInvalidateDCacheMVA((void*)current); /* We clean also because buffers are not 32-byte aligned and read is done after this anyway. */
+    current += 32U;
+  }
+}
+
+__STATIC_FORCEINLINE void __clean_cache_by_addr(uint32_t start, uint32_t size)
+{
+  uint32_t current = start & ~31U;
+  uint32_t end = (start + size + 31U) & ~31U;
+  while (current < end)
+  {
+    L1C_CleanDCacheMVA((void*)current);
+    current += 32U;
+  }
+}
+#define invalidate_cache_by_addr(__ptr__, __size__) __invalidate_cache_by_addr((uint32_t)(__ptr__), (uint32_t)(__size__))
+#define clean_cache_by_addr(__ptr__, __size__) __clean_cache_by_addr((uint32_t)(__ptr__), (uint32_t)(__size__))
+#else
+#define invalidate_cache_by_addr(__ptr__, __size__)
+#define clean_cache_by_addr(__ptr__, __size__)
+#endif
+#endif
 
 
 /*
@@ -204,10 +251,10 @@ LOCAL ER read_data(T_HAL_NET_DCB *p_dcb, T_DEVREQ *req)
 
 LOCAL ER write_data(T_HAL_NET_DCB *p_dcb, T_DEVREQ *req)
 {
-	ETH_BufferTypeDef	Txbuffer;
-	HAL_StatusTypeDef	sts;
-	UINT			flgptn;
-	ER			er;
+	static ETH_BufferTypeDef	Txbuffer;
+	HAL_StatusTypeDef		sts;
+	UINT				flgptn;
+	ER				er;
 	
 	if( req->size < 0 ) {
 		return E_PAR;
@@ -218,16 +265,19 @@ LOCAL ER write_data(T_HAL_NET_DCB *p_dcb, T_DEVREQ *req)
 	else {
 		if( p_dcb->linkstatus != TRUE ) {
 			/* Check link status */
-			//
+			p_dcb->linkstatus = PHY_GetLinkStatus(&heth1);
 			if( p_dcb->linkstatus != TRUE ) {
 				return E_NOMDA;
 			}
 		}
 		
+		memset(&Txbuffer, 0, sizeof(ETH_BufferTypeDef));
 		Txbuffer.buffer = req->buf;
 		Txbuffer.len = req->size;
 		Txbuffer.next = NULL;
+		clean_cache_by_addr(req->buf, req->size);
 		
+		TxConfig.TxDMACh = 0;
 		TxConfig.Length = req->size;
 		TxConfig.TxBuffer = &Txbuffer;
 		TxConfig.pData = req->buf;
@@ -248,12 +298,14 @@ LOCAL ER write_data(T_HAL_NET_DCB *p_dcb, T_DEVREQ *req)
 				DEV_HAL_NET_TMOUT);
 		if( er < E_OK ) {
 			/* Check link status */
-			//
+			p_dcb->linkstatus = PHY_GetLinkStatus(&heth1);
 			return er;
 		}
 		else if( (flgptn & ETHER_FLGPTN_TX_ABORTED) != 0 ) {
 			return E_IO;
 		}
+
+		HAL_ETH_ReleaseTxPacket(&heth1);
 		return E_OK;
 	}
 }
@@ -393,8 +445,16 @@ EXPORT ER dev_init_hal_net( UW unit )
 	for( i = 0; i < DEV_HAL_RBUF_NUM; i++ ) {
 		QueInsert((QUEUE*)ether_rx_buffers[i], &p_dcb->freerxbufq);
 	}
+	/* Initialze PHY */
+	PHY_Init(&heth1);
+	
+	/* Check link status. */
+	p_dcb->linkstatus = PHY_GetLinkStatus(&heth1);
 	
 	HAL_ETH_Start_IT(&heth1);
+	
+	p_dcb->initialized = TRUE;
+	
 	return E_OK;
 
 err_1:
@@ -411,6 +471,10 @@ IMPORT ER hal_net_get_link_status( UW unit )
 		return E_CTX;
 	}
 	else {
+		if( p_dcb->linkstatus != TRUE ) {
+			/* Check link status */
+			p_dcb->linkstatus = PHY_GetLinkStatus(&heth1);
+		}
 		return p_dcb->linkstatus ? E_OK : E_NOMDA;
 	}
 }

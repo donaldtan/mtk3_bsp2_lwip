@@ -21,7 +21,7 @@
 
 #define DEVNAME_HAL_NET		"net"
 #define DEV_HAL_NET_TMOUT	(2000)
-#define DEV_HAL_RBUF_NUM	8
+#define DEV_HAL_RBUF_NUM	16
 
 #define ETH_MAX_FRAME_LENGTH	(1514)
 

@@ -79,6 +79,10 @@ EXPORT ER knl_start_device( void )
 #endif
 #endif	/* DEVCNF_USE_HAL_ADC */
 
+#if DEVCNF_USE_HAL_NET
+	err = dev_init_hal_net( 0 );
+#endif
+
 	return err;
 }
 

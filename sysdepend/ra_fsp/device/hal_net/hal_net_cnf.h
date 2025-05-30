@@ -40,7 +40,7 @@
 
 /* UTK lwIP options: */
 /**
- * LWIP_NETDRV_NO_SETUP_RXBUF==1: Net device driver do not need RX buffer set.
+ * ETHER_DRV_NO_SETUP_RXBUF==1: Net device driver do not need RX buffer set.
  */
 #define ETHER_DRV_NO_SETUP_RXBUF		1
 
